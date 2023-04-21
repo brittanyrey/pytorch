@@ -2422,7 +2422,7 @@ def run(runner, args, original_dir=None):
                         marked = True
                         break
 
-            if args.dynamic_batch_only:
+            if args.dynamic_batch_only and batch_size > 1:
                 tree_map_only(torch.Tensor, detect_and_mark_batch, example_inputs)
                 assert marked, f"nothing in example_inputs had a dim with {batch_size}"
 
