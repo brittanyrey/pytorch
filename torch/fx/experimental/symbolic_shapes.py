@@ -413,8 +413,9 @@ def fx_placeholder_targets(gm):
 # Given a GraphModule and arguments to run it with, evaluate that the guards
 # for its associated ShapeEnv are satisfied by the passed arguments.  This
 # WILL check for duck sizing.
-def eval_guards(gm, *args):
-    return gm.shape_env.evaluate_guards_for_args(fx_placeholder_vals(gm), args)
+def eval_guards(gm, *args, **kwargs):
+    ignore_static = kwargs.get("ignore_static", True)
+    return gm.shape_env.evaluate_guards_for_args(fx_placeholder_vals(gm), args, ignore_static=ignore_static)
 
 def bind_symbols(gm, *args):
     return gm.shape_env.bind_symbols(fx_placeholder_vals(gm), args)
@@ -1745,7 +1746,9 @@ class ShapeEnv:
         # DimList[DimConstraint]).  Whenever Optional is accepted, that
         # just means there are no constraints
         constraint_inputs: Optional[InputList[Union[DimConstraint, Optional[DimList[DimConstraint]]]]] = None,
-        _simplified=False
+        _simplified=False,
+        # Indicates if we should produce guards for known static values.
+        ignore_static=True,
     ) -> List[str]:
         self.log.info("produce_guards")
 
@@ -1929,6 +1932,16 @@ class ShapeEnv:
                     source == symbol_to_source[expr][0]
                 ):
                     continue
+
+                # This logic excludes static values found on tensors from guarding, because
+                # dynamo's check_tensor_fn does that (see guards.cpp).
+                # However, for non tensor sources, we still need to guard here.
+                if ignore_static and isinstance(source, TensorPropertySource):
+                    maybe_static = self._maybe_evaluate_static(expr)
+                    if isinstance(maybe_static, (int, sympy.Integer)):
+                        self.log.debug("Skipping guard %s", f"{source_ref(source)} == {maybe_static}")
+                        continue
+
                 sexpr = ShapeGuardPrinter(symbol_to_source, source_ref, self.var_to_sources).doprint(expr)
                 exprs.append(f"{source_ref(source)} == {sexpr}")
                 # NB: Not necessary to report constraint violations here:
@@ -2036,10 +2049,10 @@ class ShapeEnv:
 
         return exprs
 
-    def evaluate_guards_for_args(self, placeholders, args):
+    def evaluate_guards_for_args(self, placeholders, args, *, ignore_static=True):
         from torch._dynamo.source import LocalSource
         arg_names = [f"t{i}" for i in range(len(args))]
-        guards = self.produce_guards(placeholders, [LocalSource(a) for a in arg_names])
+        guards = self.produce_guards(placeholders, [LocalSource(a) for a in arg_names], ignore_static=ignore_static)
         if guards:
             code = " and ".join(guards)
             return eval(code, SYMPY_INTERP, {"L": dict(zip(arg_names, args))})
